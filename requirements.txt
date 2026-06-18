@@ -1,0 +1,3 @@
+# LAN Scrabble dependencies.
+# Standard library only, except for the websockets transport.
+websockets>=11.0
