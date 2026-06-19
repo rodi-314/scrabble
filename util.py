@@ -61,14 +61,20 @@ def get_local_ip():
         s.close()
 
 
-def clear_screen(ansi=True):
+def clear_screen(ansi=True, scrollback=False):
     """Clear the terminal.
 
     With *ansi* True, use the ANSI clear/home sequence (fast, flicker-free).
     When ANSI is unavailable (legacy console or ``--no-color``), shell out to
     ``cls``/``clear`` so the screen still clears instead of printing raw escapes.
+    When *scrollback* is True, also erase the scrollback buffer (``ESC [ 3J`` on
+    ANSI terminals; ``clear``/``cls`` already drop scrollback on most consoles),
+    which the in-game ``clear`` command uses for a fresh-start wipe.
     """
     if ansi:
-        sys.stdout.write("\x1b[2J\x1b[H")
+        if scrollback:
+            sys.stdout.write("\x1b[3J\x1b[2J\x1b[H")
+        else:
+            sys.stdout.write("\x1b[2J\x1b[H")
     else:
         os.system("cls" if os.name == "nt" else "clear")

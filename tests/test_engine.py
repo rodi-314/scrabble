@@ -175,6 +175,42 @@ def test_reconnect_requires_token():
     assert p is a and a.connected is True
 
 
+def test_reconnect_token_takes_over_live_seat():
+    e, a, b = two_player_game()
+    # The seat still shows connected, but presenting the right token reclaims it
+    # anyway -- this is the fast reconnect that beats the server's drop detection.
+    assert a.connected is True
+    p = e.add_player("Alice", token=a.token)
+    assert p is a and a.connected is True
+
+
+def test_last_move_tracked():
+    e, a, b = two_player_game()
+    a.rack = list("HELLOAX")
+    e.play(a.id, 7, 7, "across", "HELLO")
+    expected = [(7, 7), (7, 8), (7, 9), (7, 10), (7, 11)]
+    assert sorted(e.last_move) == sorted(expected), e.last_move
+    st = e.public_state()
+    assert sorted(tuple(c) for c in st["last_move"]) == sorted(expected)
+    # A pass leaves the highlighted last move in place (no tiles were placed).
+    b.rack = list("AEIOUST")
+    e.passing(b.id)
+    assert sorted(e.last_move) == sorted(expected)
+
+
+def test_shuffle_rack_preserves_tiles():
+    e, a, b = two_player_game()
+    a.rack = list("ABCDEFG")
+    before = sorted(a.rack)
+    assert e.shuffle_rack(a.id) is True
+    assert sorted(a.rack) == before           # same multiset, possibly reordered
+    a.rack = ["A"]
+    assert e.shuffle_rack(a.id) is False       # a single tile cannot be shuffled
+    a.rack = []
+    assert e.shuffle_rack(a.id) is False
+    assert e.shuffle_rack(999999) is False     # unknown player id
+
+
 def test_full_word_required():
     e, a, b = two_player_game()
     a.rack = list("HELLOAX")

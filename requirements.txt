@@ -1,3 +1,5 @@
 # LAN Scrabble dependencies.
-# Standard library only, except for the websockets transport.
+# Standard library only, except for the websocket transport and the
+# 'cryptography' package used to encrypt all network traffic (AES-256-GCM).
 websockets>=11.0
+cryptography>=3.4

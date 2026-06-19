@@ -1,7 +1,10 @@
 """Wire protocol: every websocket message is a JSON object with a ``type`` key.
 
-Client -> server: join, start, play, pass, swap, chat
+Client -> server: join, start, play, pass, swap, shuffle, chat
 Server -> client: welcome, state, rack, error, info, chat
+
+A ``join`` may carry ``"spectator": true`` to watch without taking a seat, and a
+reconnecting player carries the secret ``"token"`` it was issued on first join.
 """
 
 import json
@@ -12,6 +15,7 @@ START = "start"
 PLAY = "play"
 PASS = "pass"
 SWAP = "swap"
+SHUFFLE = "shuffle"
 CHAT = "chat"
 
 # server -> client

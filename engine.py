@@ -70,6 +70,7 @@ class Engine:
         self.log = deque(maxlen=500)   # bounded human-readable event history
         self.winners = []
         self.end_summary = None        # final scoreboard once the game is over
+        self.last_move = []            # board coords placed by the most recent play
         self._next_id = 1
 
     def _make_token(self):
@@ -90,15 +91,20 @@ class Engine:
         key = name.lower()
         existing = self.by_name.get(key)
         if existing is not None:
+            # The secret token issued when the seat was created proves ownership.
+            # Presenting it reclaims the seat even if the server has not yet
+            # noticed the old link drop (a fast reconnect over a still-live but
+            # dead TCP connection); the server retires the stale socket.
+            if token and token == existing.token:
+                was_offline = not existing.connected
+                existing.connected = True
+                if was_offline:
+                    self.log.append(f"{existing.name} reconnected.")
+                return existing
             if existing.connected:
                 raise MoveError("That name is already taken.")
-            # Reconnecting to a disconnected seat requires the secret token that
-            # was issued when the seat was created, so nobody else can grab it.
-            if not token or token != existing.token:
-                raise MoveError("That name is taken by a disconnected player; the correct reconnect token is required.")
-            existing.connected = True
-            self.log.append(f"{existing.name} reconnected.")
-            return existing
+            # Disconnected seat, but the reconnect token is missing or wrong.
+            raise MoveError("That name is taken by a disconnected player; the correct reconnect token is required.")
         if self.phase != "lobby":
             raise MoveError("The game has already started; you can only rejoin with the name you used.")
         if len(self.players) >= MAX_PLAYERS:
@@ -173,6 +179,19 @@ class Engine:
         while len(player.rack) < RACK_SIZE and self.bag:
             player.rack.append(self.bag.pop())
 
+    def shuffle_rack(self, pid):
+        """Randomly reorder a player's own rack (purely cosmetic).
+
+        Rack order carries no game meaning -- validation works by membership --
+        so this is safe to call at any time, even when it is not the player's
+        turn.  Returns True if a shuffle was applied (the rack has >= 2 tiles).
+        """
+        player = self.by_id.get(pid)
+        if not player or len(player.rack) < 2:
+            return False
+        self.rng.shuffle(player.rack)
+        return True
+
     # ----------------------------------------------------------------- moves
     def play(self, pid, row, col, direction, word):
         self._require_turn(pid)
@@ -182,6 +201,9 @@ class Engine:
         for (r, c, letter, is_blank) in info["new"]:
             self.board.set(r, c, Tile(letter, is_blank))
             player.rack.remove("?" if is_blank else letter)
+        # Remember exactly which cells were just filled so clients can highlight
+        # the most recent move.
+        self.last_move = [(r, c) for (r, c, _, _) in info["new"]]
         player.score += info["score"]
         self._refill(player)
         self.scoreless = 0
@@ -465,6 +487,7 @@ class Engine:
             "log": list(self.log)[-12:],
             "winners": self.winners,
             "end_summary": self.end_summary,
+            "last_move": [[r, c] for (r, c) in self.last_move],
             "first_player": self.players[0].id if self.players else None,
         }
 

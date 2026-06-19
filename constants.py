@@ -64,6 +64,8 @@ ANSI = {
     'star': "\x1b[1;33;45m",      # yellow star on magenta
     'tile': "\x1b[1;30;43m",      # black on yellow (a placed tile)
     'blank_tile': "\x1b[1;31;47m",  # red on white (a played blank)
+    'last_tile': "\x1b[1;30;42m",   # black on green (tile from the last move)
+    'last_blank_tile': "\x1b[1;37;42m",  # white on green (last-move blank)
     'rack': "\x1b[1;30;42m",      # black on green (your rack)
     'turn': "\x1b[1;32m",         # bright green
     'warn': "\x1b[1;33m",         # yellow

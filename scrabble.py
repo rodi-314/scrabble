@@ -18,36 +18,56 @@ DEFAULT_PORT = 8765
 
 
 def cmd_host(args):
-    from server import GameServer
+    try:
+        from server import GameServer
+        import crypto
+    except ImportError as exc:
+        print("Encryption support is required to host a game:")
+        print(f"  {exc}")
+        return
 
     deck = dictionary_mod.load(args.dictpath, enabled=not args.no_dict)
+    # Strip first, THEN fall back: a whitespace-only --key must not become an
+    # empty (trivially guessable) room key.
+    key = (args.key or "").strip()
+    room_key = key or crypto.gen_room_key()
     ip = get_local_ip()
     bar = "=" * 56
     print(bar)
     print("  LAN SCRABBLE  -  server")
     print(bar)
-    print(f"  Listening on {args.host}:{args.port}")
+    print(f"  Listening on {args.host}:{args.port}  (encrypted: AES-256-GCM)")
     if args.no_dict:
         print("  Dictionary : disabled (any letters accepted)")
     else:
         print(f"  Dictionary : {len(deck)} words loaded")
     print()
+    print(f"  Room key   : {room_key}")
+    print("  Share this key with your players -- nobody can join (or sniff the")
+    print("  game) without it.")
+    print()
     print("  Players on your LAN can join with:")
-    print(f"      python scrabble.py join {ip} --port {args.port}")
+    print(f"      python scrabble.py join {ip} --port {args.port} --key {room_key}")
     print()
     print("  You can play too: open a second terminal and run that join command.")
     print("  Press Ctrl+C to stop the server.")
     print(bar)
 
-    server = GameServer(deck, host=args.host, port=args.port)
+    server = GameServer(deck, host=args.host, port=args.port, passphrase=room_key)
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
         print("\nServer stopped.")
 
 
-def cmd_join(args):
-    from client import Client
+def _connect(args, spectator):
+    try:
+        from client import Client
+        import crypto  # noqa: F401  (surface a missing-dependency error here)
+    except ImportError as exc:
+        print("Encryption support is required to join a game:")
+        print(f"  {exc}")
+        return
 
     ansi_ok = enable_ansi()
     address = args.address
@@ -60,22 +80,43 @@ def cmd_join(args):
 
     name = args.name
     if not name:
+        prompt = "Enter a spectator name: " if spectator else "Enter your name: "
         try:
-            name = input("Enter your name: ").strip()
+            name = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             return
     if not name:
-        name = "Player"
+        name = "Spectator" if spectator else "Player"
+
+    room_key = (args.key or "").strip()      # strip --key like the prompt path does
+    if not room_key:
+        try:
+            room_key = input("Room key (shown by the host): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+    if not room_key:
+        print("A room key is required to join. The host shows it; pass it with --key.")
+        return
 
     uri = f"ws://{address}:{port}"
     # Only use colour when the terminal can actually process ANSI and the user
     # has not opted out; otherwise escape codes would print as literal garbage.
     use_color = ansi_ok and not args.no_color
-    print(f"Connecting to {uri} ...")
+    verb = "Spectating" if spectator else "Connecting to"
+    print(f"{verb} {uri} ...")
     try:
-        asyncio.run(Client(uri, name, color=use_color).run())
+        asyncio.run(Client(uri, name, color=use_color, spectator=spectator,
+                           passphrase=room_key).run())
     except KeyboardInterrupt:
         print("\nLeft the game.")
+
+
+def cmd_join(args):
+    _connect(args, spectator=False)
+
+
+def cmd_spectate(args):
+    _connect(args, spectator=True)
 
 
 def build_parser():
@@ -93,6 +134,8 @@ def build_parser():
                       help="Path to a custom word list (one or more words per line).")
     host.add_argument("--no-dict", action="store_true",
                       help="Disable word validation (accept any letters).")
+    host.add_argument("--key", default=None,
+                      help="Room key for encryption (default: a strong random key is generated).")
     host.set_defaults(func=cmd_host)
 
     join = sub.add_parser("join", help="Join a game as a player.")
@@ -102,7 +145,20 @@ def build_parser():
     join.add_argument("--name", default=None, help="Your display name.")
     join.add_argument("--no-color", action="store_true",
                       help="Disable ANSI colours (for very basic terminals).")
+    join.add_argument("--key", default=None,
+                      help="Room key shown by the host (you are prompted if omitted).")
     join.set_defaults(func=cmd_join)
+
+    spectate = sub.add_parser("spectate", help="Watch a game without playing.")
+    spectate.add_argument("address", help="Host IP address, optionally with :port.")
+    spectate.add_argument("--port", type=int, default=DEFAULT_PORT,
+                          help=f"Server port (default {DEFAULT_PORT}).")
+    spectate.add_argument("--name", default=None, help="Display name shown to players.")
+    spectate.add_argument("--no-color", action="store_true",
+                          help="Disable ANSI colours (for very basic terminals).")
+    spectate.add_argument("--key", default=None,
+                          help="Room key shown by the host (you are prompted if omitted).")
+    spectate.set_defaults(func=cmd_spectate)
 
     return parser
 
