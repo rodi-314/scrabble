@@ -116,9 +116,16 @@ Tiles are dealt and play begins.
 | `swap <letters>` | Exchange tiles, e.g. `swap aei` (use `?` for a blank) |
 | `start` | (First player only) begin the game |
 | `say <message>` or just type text | Chat with the other players |
+| `values` | Show the point value of every letter |
 | `help` | Show the command help |
 | `board` | Redraw the screen |
 | `quit` | Leave the game |
+
+Your rack is shown with each tile's **point value printed directly beneath it**,
+and `values` prints the full letter-value table at any time. While you are
+typing, messages from other players are drawn above your prompt **without
+erasing what you have typed so far** — your in-progress command or chat stays
+on the line.
 
 ### Placing words
 
@@ -140,9 +147,12 @@ Tiles are dealt and play begins.
 - Every subsequent word must connect to tiles already on the board.
 - All words formed (the main word **and** every cross-word) must be valid.
 - A 50-point bonus for using all seven tiles in one move (a "bingo").
-- End-game scoring: leftover rack values are subtracted, and a player who empties
-  their rack collects everyone else's leftovers. The game ends when the bag is
-  empty and a player goes out, or after two full rounds with no scoring.
+- End-game scoring follows the standard rules: each player's leftover rack value
+  is subtracted from their score, and a player who empties their rack while the
+  bag is empty instead **collects everyone else's leftovers**. The game ends when
+  the bag is empty and a player goes out, or after two full rounds with no
+  scoring. When it ends, everyone sees a final scoreboard showing each player's
+  adjustment, their revealed leftover tiles, the final totals, and the winner.
 
 ### If your connection drops
 

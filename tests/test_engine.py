@@ -184,6 +184,41 @@ def test_full_word_required():
     expect_error(lambda: e.play(b.id, 7, 12, "across", "A"), contains="before")
 
 
+def test_end_summary_passed_out():
+    e, a, b = two_player_game()
+    a.rack = list("AE")       # leftover value 1 + 1 = 2
+    b.rack = list("QZ")       # leftover value 10 + 10 = 20
+    # Two full scoreless rounds (4 passes) ends a 2-player game.
+    e.passing(a.id); e.passing(b.id); e.passing(a.id); e.passing(b.id)
+    assert e.phase == "over"
+    s = e.end_summary
+    assert s is not None and "passed out" in s["reason"].lower()
+    rows = {r["name"]: r for r in s["rows"]}
+    assert rows["Alice"]["adjustment"] == -2 and rows["Alice"]["final"] == -2
+    assert rows["Bob"]["adjustment"] == -20 and rows["Bob"]["final"] == -20
+    assert rows["Bob"]["leftover"] == "QZ"
+    # Nobody went out, so each player only loses their own leftovers; Alice wins.
+    assert s["winners"] == ["Alice"]
+
+
+def test_end_summary_played_out():
+    e, a, b = two_player_game()
+    e.bag = []                # empty bag so emptying a rack ends the game
+    a.rack = list("HA")       # plays out completely
+    b.rack = list("QZ")       # leftover value 20
+    a_base = a.score
+    info = e.play(a.id, 7, 7, "across", "HA")   # HA across the center scores 10
+    assert e.phase == "over"
+    s = e.end_summary
+    rows = {r["name"]: r for r in s["rows"]}
+    # Alice emptied her rack: she gains Bob's leftover (20), Bob loses it.
+    assert rows["Alice"]["leftover"] == "" and rows["Alice"]["adjustment"] == 20
+    assert rows["Alice"]["final"] == a_base + info["score"] + 20
+    assert rows["Bob"]["adjustment"] == -20 and rows["Bob"]["final"] == -20
+    assert "used all of their tiles" in s["reason"]
+    assert s["winners"] == ["Alice"]
+
+
 def run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

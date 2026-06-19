@@ -69,6 +69,7 @@ class Engine:
         self.scoreless = 0       # consecutive passes/swaps; ends the game if high
         self.log = deque(maxlen=500)   # bounded human-readable event history
         self.winners = []
+        self.end_summary = None        # final scoreboard once the game is over
         self._next_id = 1
 
     def _make_token(self):
@@ -242,23 +243,59 @@ class Engine:
             self._advance()
 
     def _end_game(self, went_out):
+        """Close the game following the official end-game scoring rules.
+
+        Each player's unplayed tiles are deducted from their score.  If a player
+        went out (emptied their rack while the bag was empty), they instead gain
+        the sum of everyone else's unplayed tiles.  A structured ``end_summary``
+        records the before/after of every seat so the result can be shown
+        transparently, with each player's leftover tiles revealed.
+        """
         self.phase = "over"
+        # Snapshot scores and leftover racks *before* applying any adjustment.
+        base = {p.id: p.score for p in self.players}
+        leftover = {p.id: "".join(sorted(p.rack)) for p in self.players}
+        leftover_value = {p.id: p.rack_value() for p in self.players}
+
         if went_out is not None:
             # The player who emptied their rack collects everyone else's leftovers.
             gained = 0
             for p in self.players:
                 if p is went_out:
                     continue
-                v = p.rack_value()
-                p.score -= v
-                gained += v
+                p.score -= leftover_value[p.id]
+                gained += leftover_value[p.id]
             went_out.score += gained
+            reason = (f"{went_out.name} used all of their tiles and the bag is "
+                      f"empty, so the game ends.")
         else:
             for p in self.players:
-                p.score -= p.rack_value()
+                p.score -= leftover_value[p.id]
+            reason = "Two scoreless rounds in a row - the game is passed out."
+
         best = max((p.score for p in self.players), default=0)
         self.winners = [p.name for p in self.players if p.score == best]
-        self.log.append("Game over! Winner(s): " + ", ".join(self.winners))
+        self.end_summary = {
+            "reason": reason,
+            "winners": list(self.winners),
+            "rows": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "base": base[p.id],
+                    "leftover": leftover[p.id],
+                    "leftover_value": leftover_value[p.id],
+                    "adjustment": p.score - base[p.id],
+                    "final": p.score,
+                }
+                for p in self.players
+            ],
+        }
+        self.log.append("Game over. " + reason)
+        self.log.append("Final score: " + ", ".join(
+            f"{p.name} {p.score}"
+            for p in sorted(self.players, key=lambda x: -x.score)
+        ))
 
     # ------------------------------------------------------- validation core
     def _validate_and_score(self, player, row, col, direction, word):
@@ -427,6 +464,7 @@ class Engine:
             "bag": len(self.bag),
             "log": list(self.log)[-12:],
             "winners": self.winners,
+            "end_summary": self.end_summary,
             "first_player": self.players[0].id if self.players else None,
         }
 
