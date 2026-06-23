@@ -31,6 +31,11 @@ Commands:
   pass                                forfeit your turn
   swap <letters>                      exchange tiles, e.g.  swap aei   (use '?' for a blank)
   shuffle                             randomly reorder the tiles on your rack
+  check <word> [word ...]             check whether word(s) are valid (any time)
+  team <name>                         (lobby) join a team; 'team none' to leave
+  tc <message>                        private chat to your teammates only
+  addai <easy|medium|hard|expert>     (host, lobby) add a computer player
+  removeai <name>                     (host, lobby) remove a computer player
   start                               (host only) begin the game once everyone has joined
   say <message>  /  <message>         chat with the other players
   values                              show the point value of every letter
@@ -40,8 +45,10 @@ Commands:
   quit                                leave the game
 Coordinates are a column letter (A-O) + a row number (1-15); 'across' goes right,
 'down' goes down, and you type the full word including any tiles already on the board.
-Line editing: arrow keys move the cursor and scroll command history; Home/End jump
-to the ends; Ctrl-U clears the line; Ctrl-W erases a word."""
+Teams share a score and a private chat; with a turn time limit, you are forced to
+pass when the clock runs out. After you play, a coach shows the best plays you
+could have made. Line editing: arrow keys move the cursor and scroll command
+history; Home/End jump to the ends; Ctrl-U clears the line; Ctrl-W erases a word."""
 
 HISTORY_MAX = 200          # commands remembered for Up/Down recall
 TURN_ANIM_FRAMES = 6       # frames in the "your turn" attention animation
@@ -78,11 +85,16 @@ class Client:
         self._last_was_cr = False  # for coalescing a CRLF pair into one newline
         self._anim_task = None    # running "your turn" animation task
         self._anim_frame = None   # current animation frame, or None when idle
+        self._loop = None         # the running event loop (for the turn clock)
+        self._turn_limit = 0      # seconds per turn (0 == no clock), from state
+        self._turn_deadline = None  # loop.time() when the current turn expires
+        self._clock_task = None   # ticking countdown re-render task
 
     # ------------------------------------------------------------- lifecycle
     async def run(self):
         # One persistent input pump for the whole session, so transient
         # reconnects do not spawn competing readers of the same terminal.
+        self._loop = asyncio.get_running_loop()
         self.input_queue = asyncio.Queue()
         self._raw = self._enable_raw()
         self._start_input()
@@ -123,6 +135,15 @@ class Client:
                                          "Check the host IP/port and that the server is running on your LAN.")
                         return
 
+                # Tear down per-connection UI tasks so the countdown/animation do
+                # not keep ticking during the reconnect backoff, and so a stale
+                # deadline cannot survive into the new connection; the first state
+                # after reconnect starts a fresh clock.
+                self._cancel_clock()
+                self._cancel_animation()
+                self._turn_deadline = None
+                self._turn_limit = 0
+
                 if self.quitting:
                     break
                 if not self._secure_ok and not self.token:
@@ -150,6 +171,7 @@ class Client:
                     raise
         finally:
             self._cancel_animation()
+            self._cancel_clock()
             self._restore_terminal()
 
     # --------------------------------------------------------------- input pump
@@ -575,7 +597,15 @@ class Client:
                 elif mtype == P.INFO:
                     self.messages.append(msg.get("message", ""))
                 elif mtype == P.CHATMSG:
-                    self.messages.append(f"[{msg.get('name', '?')}] {msg.get('text', '')}")
+                    if msg.get("scope") == "team":
+                        tag = self._c("turn", "[team]") + " "
+                    else:
+                        tag = ""
+                    self.messages.append(f"{tag}[{msg.get('name', '?')}] {msg.get('text', '')}")
+                elif mtype == P.CHECKED:
+                    self._show_checked(msg)
+                elif mtype == P.COACH:
+                    self._show_coach(msg)
                 self.render()
         except websockets.exceptions.ConnectionClosed:
             if self.quitting:
@@ -587,11 +617,87 @@ class Client:
         prev_turn = self.state.get("turn") if isinstance(self.state, dict) else None
         self.state = new_state
         now_turn = new_state.get("turn")
-        if (new_state.get("phase") == "playing" and not self.spectator
+        phase = new_state.get("phase")
+        if (phase == "playing" and not self.spectator
                 and now_turn == self.my_id and prev_turn != self.my_id):
             self._start_turn_animation()
         elif now_turn != self.my_id:
             self._cancel_animation()
+        # Per-turn countdown: (re)start the local clock when the turn (or the
+        # limit) changes, so everyone sees how long the current player has left.
+        limit = new_state.get("turn_limit") or 0
+        if phase == "playing" and limit > 0 and now_turn is not None:
+            if (now_turn != prev_turn or limit != self._turn_limit
+                    or self._turn_deadline is None):
+                self._turn_limit = limit
+                self._turn_deadline = self._loop.time() + limit if self._loop else None
+                self._restart_clock()
+        else:
+            self._turn_limit = limit
+            self._turn_deadline = None
+            self._cancel_clock()
+
+    # ------------------------------------------------------------- turn clock
+    def _seconds_left(self):
+        if self._turn_deadline is None or self._loop is None:
+            return None
+        return max(0, int(round(self._turn_deadline - self._loop.time())))
+
+    def _restart_clock(self):
+        self._cancel_clock()
+        if not self._raw:
+            return            # non-interactive: the banner text is enough
+        self._clock_task = asyncio.create_task(self._clock_loop())
+
+    def _cancel_clock(self):
+        task = self._clock_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._clock_task = None
+
+    async def _clock_loop(self):
+        """Re-render once a second so the turn countdown ticks down."""
+        try:
+            while self._turn_deadline is not None:
+                left = self._seconds_left()
+                self.render()
+                if left is not None and left <= 0:
+                    return        # server will have forced the pass by now
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
+    def _show_checked(self, msg):
+        """Render the result of a 'check' word lookup."""
+        if not msg.get("enabled", True):
+            self.messages.append("[check] validation is off on this server (any word is accepted).")
+            return
+        results = msg.get("results") or []
+        if not results:
+            self.messages.append("[check] give me a word, e.g.  check zydeco")
+            return
+        parts = []
+        for row in results:
+            word, valid, value = row[0], row[1], row[2]
+            verdict = self._c("turn", "valid") if valid else self._c("warn", "INVALID")
+            parts.append(f"{word}({value}) {verdict}")
+        self.messages.append("[check] " + "   ".join(parts))
+
+    def _show_coach(self, msg):
+        """Render the private post-move coaching: best plays + a comment."""
+        played = msg.get("played") or {}
+        best = msg.get("best") or []
+        lines = [self._c("bold", "-- Coach --")
+                 + f" you played {played.get('word', '?')} for {played.get('score', '?')}."]
+        if best:
+            lines.append("Best plays you could have made:")
+            for row in best:
+                word, coord, direction, score = row[0], row[1], row[2], row[3]
+                lines.append(f"  {score:>3}  {word} {coord} {direction}")
+        comment = msg.get("comment")
+        if comment:
+            lines.append(self._c("turn", comment))
+        self.messages.append("\n".join(lines))
 
     async def _consume_input(self):
         self.render()
@@ -615,8 +721,10 @@ class Client:
         parts = line.split()
         cmd = parts[0].lower()
         if self.spectator and cmd in ("play", "p", "pass", "swap", "exchange",
-                                      "start", "shuffle", "sh"):
-            self._note("You are spectating - you can chat, but you cannot play.")
+                                      "start", "shuffle", "sh", "team", "teamchat",
+                                      "tc", "tm", "addai", "addbot", "removeai",
+                                      "removebot", "rmai"):
+            self._note("You are spectating - you can chat and check words, but you cannot play.")
             return
         try:
             if cmd in ("play", "p"):
@@ -636,6 +744,35 @@ class Client:
                 await self._send({"type": P.SWAP, "tiles": parts[1]})
             elif cmd in ("shuffle", "sh"):
                 await self._send({"type": P.SHUFFLE})
+            elif cmd in ("check", "valid", "lookup"):
+                if len(parts) < 2:
+                    self._note("Usage: check <word> [word ...]")
+                else:
+                    await self._send({"type": P.CHECK, "words": parts[1:]})
+            elif cmd == "team":
+                if len(parts) < 2 or parts[1].lower() in ("none", "clear", "-", "leave"):
+                    await self._send({"type": P.SETTEAM, "team": ""})
+                else:
+                    await self._send({"type": P.SETTEAM, "team": parts[1]})
+            elif cmd in ("teamchat", "tc", "tm"):
+                if len(parts) < 2:
+                    self._note("Usage: tc <message>  (private message to your team)")
+                else:
+                    await self._send({"type": P.CHAT, "scope": "team",
+                                      "text": line.split(None, 1)[1]})
+            elif cmd in ("addai", "addbot"):
+                if len(parts) < 2:
+                    self._note("Usage: addai <easy|medium|hard|expert> [name]")
+                else:
+                    obj = {"type": P.ADDAI, "level": parts[1]}
+                    if len(parts) >= 3:
+                        obj["name"] = parts[2]
+                    await self._send(obj)
+            elif cmd in ("removeai", "removebot", "rmai"):
+                if len(parts) < 2:
+                    self._note("Usage: removeai <name>")
+                else:
+                    await self._send({"type": P.REMOVEAI, "name": parts[1]})
             elif cmd == "start":
                 await self._send({"type": P.START})
             elif cmd in ("help", "?", "h"):
@@ -749,7 +886,12 @@ class Client:
             mark = self._c("turn", ">") if p["id"] == turn else " "
             you = " (you)" if p["id"] == self.my_id else ""
             offline = "" if p["connected"] else " [offline]"
-            out.append(f" {mark} {p['name']}{you}: {p['score']} pts, {p['tiles']} tiles{offline}")
+            ai = self._c("dim", f" [AI:{p['ai_level']}]") if p.get("is_ai") else ""
+            team = self._c("warn", f" {{{p['team']}}}") if p.get("team") else ""
+            out.append(f" {mark} {p['name']}{you}{team}{ai}: "
+                       f"{p['score']} pts, {p['tiles']} tiles{offline}")
+        if st.get("teamed"):
+            out.extend(self._team_totals_lines(st))
         out.append(f"Tiles left in bag: {st['bag']}")
         specs = st.get("spectators") or []
         if specs:
@@ -776,15 +918,20 @@ class Client:
         phase = st["phase"]
         if phase == "lobby":
             if not self.spectator and st.get("first_player") == self.my_id:
-                out.append(self._c("turn", "You are the host. Type 'start' once everyone has joined."))
+                out.append(self._c("turn", "You are the host. 'addai <level>' adds a bot; "
+                                           "'start' once everyone has joined."))
             else:
                 out.append("Waiting for the host to start the game...")
+            if not self.spectator:
+                out.append(self._c("dim", "Tip: 'team <name>' to form a team (shared score + private chat)."))
         elif phase == "playing":
+            left = self._seconds_left()
+            clock = self._c("warn", f"   [{left}s left]") if left is not None else ""
             if not self.spectator and turn == self.my_id:
-                out.append(self._your_turn_banner())
+                out.append(self._your_turn_banner() + clock)
             else:
                 who = next((p["name"] for p in st["players"] if p["id"] == turn), "?")
-                out.append(f"Waiting for {who} to move...")
+                out.append(f"Waiting for {who} to move...{clock}")
         elif phase == "over":
             out.extend(self._over_lines(st))
         self._flush(out)
@@ -838,6 +985,24 @@ class Client:
             "   points:  " + " ".join(points),
         ]
 
+    def _team_totals_lines(self, st):
+        """A scoreboard grouped by team (shown only in teaming mode)."""
+        totals = {}
+        for p in st["players"]:
+            team = p.get("team")
+            if not team:
+                continue
+            agg = totals.setdefault(team, {"score": 0, "members": []})
+            agg["score"] += p["score"]
+            agg["members"].append(p["name"])
+        if not totals:
+            return []
+        lines = ["Teams:"]
+        for team, agg in sorted(totals.items(), key=lambda kv: -kv[1]["score"]):
+            members = ", ".join(agg["members"])
+            lines.append(f"  {self._c('warn', team)}: {agg['score']} pts  ({members})")
+        return lines
+
     def _your_turn_banner(self):
         """The 'your turn' prompt -- a flashing/growing banner while the turn
         animation is running, then a steady banner with the command hints."""
@@ -886,8 +1051,22 @@ class Client:
             adjs = f"{adj:+d}" if adj else "0"
             left = r.get("leftover") or "-"
             lines.append(f"{mark}{r['name'][:16]:<16}{r['final']:>6}  {adjs:>4}  {left}")
+        teams = summary.get("teams") if summary.get("teamed") else None
+        if teams:
+            lines.append("")
+            lines.append("Team standings:")
+            for t in teams:
+                star = self._c("turn", " * ") if t.get("winner") else "   "
+                members = ", ".join(t.get("members", []))
+                lines.append(f"{star}{str(t['team'])[:16]:<16}{t['total']:>6}   ({members})")
         lines.append("")
-        if len(winners) == 1:
+        if teams:
+            win_teams = [t["team"] for t in teams if t.get("winner")]
+            if len(win_teams) == 1:
+                lines.append(self._c("bold", f"Winning team: {win_teams[0]} - congratulations!"))
+            elif win_teams:
+                lines.append(self._c("bold", "It's a tie between teams " + ", ".join(win_teams) + "!"))
+        elif len(winners) == 1:
             lines.append(self._c("bold", f"Winner: {winners[0]} - congratulations!"))
         elif winners:
             lines.append(self._c("bold", "It's a tie between " + ", ".join(winners) + "!"))

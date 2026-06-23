@@ -309,6 +309,90 @@ def test_game_over_scoreboard():
     assert "+20" in out and "-20" in out     # the scoring adjustments
 
 
+class _FakeLoop:
+    """A stand-in event loop exposing just .time() for the turn-clock tests."""
+    def __init__(self, now):
+        self._now = now
+
+    def time(self):
+        return self._now
+
+
+def test_render_shows_team_and_ai_tags():
+    c = make_client()
+    st = base_state()
+    st["players"][0]["team"] = "RED"
+    st["players"][1] = {"id": 3, "name": "Robo", "score": 12, "tiles": 7,
+                        "connected": True, "team": "BLUE", "is_ai": True,
+                        "ai_level": "expert"}
+    st["teamed"] = True
+    c.state = st
+    c.rack = ["A"]
+    out = capture_render(c)
+    assert "{RED}" in out and "{BLUE}" in out      # team tags by each name
+    assert "[AI:expert]" in out                    # the AI difficulty tag
+    assert "Teams:" in out                         # the team totals block
+
+
+def test_render_shows_turn_countdown():
+    c = make_client()
+    st = base_state()
+    st["turn_limit"] = 30
+    c.state = st
+    c.rack = ["A"]
+    c._loop = _FakeLoop(100.0)
+    c._turn_deadline = 125.0                        # 25 seconds remaining
+    out = capture_render(c)
+    assert "[25s left]" in out, repr(out[-200:])
+
+
+def test_show_coach_renders_best_plays_and_comment():
+    c = make_client()
+    c.state = base_state()
+    c._show_coach({
+        "played": {"word": "HELLO", "score": 18},
+        "best": [["THOLES", "H3", "down", 26], ["HELLOS", "H8", "across", 20]],
+        "comment": "Good play!",
+    })
+    out = capture_render(c)
+    assert "-- Coach --" in out
+    assert "THOLES" in out and "26" in out
+    assert "Good play!" in out
+
+
+def test_show_checked_renders_validity():
+    c = make_client()
+    c.state = base_state()
+    c._show_checked({"results": [["HELLO", True, 8], ["ZZZZZ", False, 50]],
+                     "enabled": True})
+    out = capture_render(c)
+    assert "HELLO" in out and "valid" in out
+    assert "ZZZZZ" in out and "INVALID" in out
+
+
+def test_game_over_team_standings():
+    c = make_client()
+    st = base_state(phase="over")
+    st["players"][0]["score"], st["players"][0]["team"] = 40, "RED"
+    st["players"][1]["score"], st["players"][1]["team"] = 30, "BLUE"
+    st["winners"] = ["Alice"]
+    st["end_summary"] = {
+        "reason": "Two scoreless rounds in a row - the game is passed out.",
+        "winners": ["Alice"], "teamed": True,
+        "teams": [{"team": "RED", "members": ["Alice"], "total": 40, "winner": True},
+                  {"team": "BLUE", "members": ["Bob"], "total": 30, "winner": False}],
+        "rows": [{"id": 1, "name": "Alice", "team": "RED", "base": 40,
+                  "leftover": "", "leftover_value": 0, "adjustment": 0, "final": 40},
+                 {"id": 2, "name": "Bob", "team": "BLUE", "base": 30,
+                  "leftover": "", "leftover_value": 0, "adjustment": 0, "final": 30}],
+    }
+    c.state = st
+    out = capture_render(c)
+    assert "GAME OVER" in out
+    assert "Team standings:" in out
+    assert "Winning team: RED" in out
+
+
 def run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

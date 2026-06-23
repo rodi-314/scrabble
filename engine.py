@@ -42,14 +42,23 @@ def parse_coord(text):
     return row, col
 
 
+def normalize_team(name):
+    """A short, tidy team label (uppercased alphanumerics), or '' to clear it."""
+    cleaned = "".join(ch for ch in (name or "").strip().upper() if ch.isalnum())
+    return cleaned[:12]
+
+
 class Player:
-    def __init__(self, pid, name, token):
+    def __init__(self, pid, name, token, is_ai=False, ai_level=None):
         self.id = pid
         self.name = name
         self.token = token          # secret required to reconnect to this seat
         self.rack = []
         self.score = 0
         self.connected = True
+        self.team = None            # optional team label (teaming mode)
+        self.is_ai = is_ai          # server-controlled computer player
+        self.ai_level = ai_level    # easy | medium | hard | expert (AI only)
 
     def rack_value(self):
         return sum(0 if t == "?" else TILE_VALUES[t] for t in self.rack)
@@ -117,6 +126,29 @@ class Engine:
         self.log.append(f"{player.name} joined.")
         return player
 
+    def add_ai_player(self, name, level):
+        """Seat a computer-controlled player (lobby only).
+
+        AI seats are always 'connected' (the server drives them) and carry a
+        difficulty level; otherwise they behave exactly like any other player."""
+        name = name.strip()
+        if not name:
+            raise MoveError("An AI player needs a name.")
+        if self.phase != "lobby":
+            raise MoveError("AI players can only be added in the lobby.")
+        if name.lower() in self.by_name:
+            raise MoveError("That name is already taken.")
+        if len(self.players) >= MAX_PLAYERS:
+            raise MoveError(f"The game is full ({MAX_PLAYERS} players maximum).")
+        player = Player(self._next_id, name, self._make_token(),
+                        is_ai=True, ai_level=level)
+        self._next_id += 1
+        self.players.append(player)
+        self.by_id[player.id] = player
+        self.by_name[name.lower()] = player
+        self.log.append(f"{player.name} (AI: {level}) joined.")
+        return player
+
     def remove_player(self, pid):
         """Used only while still in the lobby; drops the seat entirely."""
         player = self.by_id.pop(pid, None)
@@ -128,6 +160,33 @@ class Engine:
         if self.players:
             self.turn %= len(self.players)
         self.log.append(f"{player.name} left.")
+
+    def set_team(self, pid, team):
+        """Assign (or clear, with '') a player's team.  Lobby only, so teams are
+        fixed once play begins."""
+        if self.phase != "lobby":
+            raise MoveError("Teams can only be set in the lobby.")
+        player = self.by_id.get(pid)
+        if not player:
+            return None
+        label = normalize_team(team)
+        player.team = label or None
+        if player.team:
+            self.log.append(f"{player.name} joined team {player.team}.")
+        else:
+            self.log.append(f"{player.name} left their team.")
+        return player.team
+
+    def teamed(self):
+        """True when at least two distinct teams are in play (so team scoring and
+        team-only chat are active)."""
+        teams = {p.team for p in self.players if p.team}
+        return len(teams) >= 2
+
+    def _team_key(self, player):
+        # A player with no team is their own team of one, so a free-for-all game
+        # scores exactly as it always did.
+        return player.team if player.team else f"__solo_{player.id}"
 
     def set_connected(self, pid, connected):
         """Mark a seat connected/disconnected during play (allows reconnects)."""
@@ -144,15 +203,28 @@ class Engine:
     def start(self, pid):
         if self.phase != "lobby":
             raise MoveError("The game has already started.")
-        if not self.players or self.players[0].id != pid:
+        host = self.first_human()
+        if host is None or host.id != pid:
             raise MoveError("Only the first player to join can start the game.")
         if len(self.players) < 2:
             raise MoveError("You need at least 2 players to start.")
         for player in self.players:
             self._refill(player)
         self.phase = "playing"
-        self.turn = 0
+        # The human host takes the first turn -- normally seat 0, but if the
+        # original host left the lobby an AI may sit at seat 0, and a human must
+        # still move first.
+        self.turn = self.players.index(host)
         self.log.append("The game has started!")
+
+    def first_human(self):
+        """The first non-AI player -- the 'host' who may start the game and add
+        or remove AI seats.  AI seats can never become the host even if they end
+        up at the front of the list (e.g. the human host leaves the lobby)."""
+        for p in self.players:
+            if not p.is_ai:
+                return p
+        return None
 
     # ----------------------------------------------------------------- turns
     def current(self):
@@ -216,11 +288,14 @@ class Engine:
             self._advance()
         return info
 
-    def passing(self, pid):
+    def passing(self, pid, timed_out=False):
         self._require_turn(pid)
         player = self.by_id[pid]
         self.scoreless += 1
-        self.log.append(f"{player.name} passed.")
+        if timed_out:
+            self.log.append(f"{player.name} ran out of time and was forced to pass.")
+        else:
+            self.log.append(f"{player.name} passed.")
         self._after_scoreless()
 
     def swap(self, pid, letters):
@@ -295,15 +370,43 @@ class Engine:
                 p.score -= leftover_value[p.id]
             reason = "Two scoreless rounds in a row - the game is passed out."
 
-        best = max((p.score for p in self.players), default=0)
-        self.winners = [p.name for p in self.players if p.score == best]
+        # Winners are decided by TEAM total (a player with no team is a team of
+        # one, so a free-for-all is unchanged).
+        groups = {}
+        for p in self.players:
+            groups.setdefault(self._team_key(p), []).append(p)
+        team_total = {k: sum(pp.score for pp in members)
+                      for k, members in groups.items()}
+        best_total = max(team_total.values(), default=0)
+        winning = {k for k, t in team_total.items() if t == best_total}
+        self.winners = [p.name for p in self.players if self._team_key(p) in winning]
+
+        teamed = self.teamed()
+        teams_rows = None
+        if teamed:
+            teams_rows = sorted(
+                (
+                    {
+                        "team": members[0].team or members[0].name,
+                        "members": [m.name for m in members],
+                        "total": team_total[k],
+                        "winner": k in winning,
+                    }
+                    for k, members in groups.items()
+                ),
+                key=lambda row: -row["total"],
+            )
+
         self.end_summary = {
             "reason": reason,
             "winners": list(self.winners),
+            "teamed": teamed,
+            "teams": teams_rows,
             "rows": [
                 {
                     "id": p.id,
                     "name": p.name,
+                    "team": p.team,
                     "base": base[p.id],
                     "leftover": leftover[p.id],
                     "leftover_value": leftover_value[p.id],
@@ -479,6 +582,9 @@ class Engine:
                     "score": p.score,
                     "tiles": len(p.rack),
                     "connected": p.connected,
+                    "team": p.team,
+                    "is_ai": p.is_ai,
+                    "ai_level": p.ai_level,
                 }
                 for p in self.players
             ],
@@ -488,7 +594,8 @@ class Engine:
             "winners": self.winners,
             "end_summary": self.end_summary,
             "last_move": [[r, c] for (r, c) in self.last_move],
-            "first_player": self.players[0].id if self.players else None,
+            "first_player": self.first_human().id if self.first_human() else None,
+            "teamed": self.teamed(),
         }
 
     def rack_of(self, pid):

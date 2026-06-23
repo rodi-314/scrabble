@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from constants import TILE_DISTRIBUTION, TILE_VALUES, RACK_SIZE
 from dictionary import Dictionary
-from engine import Engine, MoveError, parse_coord, coord_name
+from engine import Engine, MoveError, parse_coord, coord_name, normalize_team
 
 WORDS = ["HELLO", "HA", "AH", "FRIENDS", "AS", "AX", "OX", "HE", "EH", "HEN",
          "AN", "NA", "AT", "TA", "CAT", "CATS", "QI", "ZA"]
@@ -253,6 +253,104 @@ def test_end_summary_played_out():
     assert rows["Bob"]["adjustment"] == -20 and rows["Bob"]["final"] == -20
     assert "used all of their tiles" in s["reason"]
     assert s["winners"] == ["Alice"]
+
+
+def test_normalize_team():
+    assert normalize_team("  red team! ") == "REDTEAM"
+    assert normalize_team("A" * 30) == "A" * 12
+    assert normalize_team("") == ""
+    assert normalize_team(None) == ""
+
+
+def test_passing_timed_out_logs_distinctly():
+    e, a, b = two_player_game()
+    e.passing(a.id, timed_out=True)
+    assert any("ran out of time" in ln for ln in e.log), list(e.log)
+    e.passing(b.id)                     # a normal pass reads differently
+    assert any(ln.endswith("passed.") for ln in e.log), list(e.log)
+
+
+def test_set_team_lobby_only_and_teamed_flag():
+    e = make_engine()
+    a = e.add_player("Alice")
+    b = e.add_player("Bob")
+    assert e.teamed() is False
+    assert e.set_team(a.id, "  red ") == "RED"        # normalized
+    assert e.teamed() is False                         # only one team so far
+    e.set_team(b.id, "blue")
+    assert e.teamed() is True
+    e.set_team(a.id, "")                               # clearing a team
+    assert a.team is None and e.teamed() is False
+    e.set_team(a.id, "Red")
+    e.start(a.id)
+    expect_error(lambda: e.set_team(a.id, "Green"), contains="lobby")
+
+
+def test_add_ai_player():
+    e = make_engine()
+    a = e.add_player("Alice")
+    bot = e.add_ai_player("Robo", "expert")
+    assert bot.is_ai is True and bot.ai_level == "expert" and bot.connected is True
+    assert e.players[0] is a            # the human still owns seat #1 (can 'start')
+    expect_error(lambda: e.add_ai_player("Robo", "easy"), contains="taken")
+    e.start(a.id)                       # one human + one AI is enough to start
+    assert e.phase == "playing"
+    expect_error(lambda: e.add_ai_player("Late", "easy"), contains="lobby")
+
+
+def test_host_is_first_human_never_an_ai():
+    e = make_engine()
+    host = e.add_player("Alice")
+    bot = e.add_ai_player("Robo", "easy")
+    bob = e.add_player("Bob")
+    assert e.first_human() is host
+    # The human host leaves the lobby; the AI (now at the front of the list)
+    # must NOT inherit host powers -- the next human does.
+    e.remove_player(host.id)
+    assert e.players[0] is bot              # the AI is literally first now...
+    assert e.first_human() is bob           # ...but the host is the first human
+    assert e.public_state()["first_player"] == bob.id
+    expect_error(lambda: e.start(bot.id), contains="first player")
+    e.start(bob.id)                         # the remaining human can still start
+    assert e.phase == "playing"
+    # ...and the human starter moves first, not the AI sitting at seat 0.
+    assert e.current() is bob and e.current().is_ai is False
+
+
+def test_team_total_decides_winner_over_individual():
+    e = make_engine()
+    a = e.add_player("Alice")
+    b = e.add_player("Bob")
+    c = e.add_player("Carol")
+    e.set_team(a.id, "Red")
+    e.set_team(c.id, "Red")
+    e.set_team(b.id, "Blue")
+    e.start(a.id)
+    # Bob is the top individual (30), but team Red (20 + 20 = 40) beats Blue (30).
+    a.score, b.score, c.score = 20, 30, 20
+    a.rack = b.rack = c.rack = []        # no leftover deductions
+    for _ in range(2):                   # two full scoreless rounds end the game
+        e.passing(a.id); e.passing(b.id); e.passing(c.id)
+    assert e.phase == "over"
+    assert e.winners == ["Alice", "Carol"], e.winners
+    s = e.end_summary
+    assert s["teamed"] is True
+    teams = {t["team"]: t for t in s["teams"]}        # labels are normalized upper
+    assert teams["RED"]["total"] == 40 and teams["RED"]["winner"] is True
+    assert teams["BLUE"]["total"] == 30 and teams["BLUE"]["winner"] is False
+
+
+def test_public_state_exposes_team_and_ai_fields():
+    e = make_engine()
+    a = e.add_player("Alice")
+    bot = e.add_ai_player("Robo", "hard")
+    e.set_team(a.id, "Red")
+    st = e.public_state()
+    assert st["teamed"] is False         # only one team set -> not yet teamed
+    pa = next(p for p in st["players"] if p["id"] == a.id)
+    pb = next(p for p in st["players"] if p["id"] == bot.id)
+    assert pa["team"] == "RED" and pa["is_ai"] is False
+    assert pb["is_ai"] is True and pb["ai_level"] == "hard" and pb["team"] is None
 
 
 def run_all():

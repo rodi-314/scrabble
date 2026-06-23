@@ -21,6 +21,7 @@ def cmd_host(args):
     try:
         from server import GameServer
         import crypto
+        import wordsmith
     except ImportError as exc:
         print("Encryption support is required to host a game:")
         print(f"  {exc}")
@@ -31,6 +32,15 @@ def cmd_host(args):
     # empty (trivially guessable) room key.
     key = (args.key or "").strip()
     room_key = key or crypto.gen_room_key()
+    turn_limit = max(0, args.turn_limit)
+    coach = not args.no_coach
+    ai_specs = []
+    for level in (args.ai or []):
+        level = level.strip().lower()
+        if level in wordsmith.LEVELS:
+            ai_specs.append(level)
+        else:
+            print(f"  (ignoring unknown AI level '{level}'; use easy/medium/hard/expert)")
     ip = get_local_ip()
     bar = "=" * 56
     print(bar)
@@ -41,6 +51,14 @@ def cmd_host(args):
         print("  Dictionary : disabled (any letters accepted)")
     else:
         print(f"  Dictionary : {len(deck)} words loaded")
+    print(f"  Turn limit : {turn_limit}s per move (auto-pass)" if turn_limit
+          else "  Turn limit : none")
+    print(f"  Coaching   : {'on (top plays + comments after each move)' if coach else 'off'}")
+    if ai_specs:
+        print(f"  AI players : {', '.join(ai_specs)}  (seated when you join)")
+    if args.no_dict and (ai_specs or coach):
+        print("  Note       : AI players and coaching need the dictionary; they")
+        print("               do little with --no-dict.")
     print()
     print(f"  Room key   : {room_key}")
     print("  Share this key with your players -- nobody can join (or sniff the")
@@ -53,7 +71,8 @@ def cmd_host(args):
     print("  Press Ctrl+C to stop the server.")
     print(bar)
 
-    server = GameServer(deck, host=args.host, port=args.port, passphrase=room_key)
+    server = GameServer(deck, host=args.host, port=args.port, passphrase=room_key,
+                        turn_limit=turn_limit, coach=coach, ai_specs=ai_specs)
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
@@ -136,6 +155,12 @@ def build_parser():
                       help="Disable word validation (accept any letters).")
     host.add_argument("--key", default=None,
                       help="Room key for encryption (default: a strong random key is generated).")
+    host.add_argument("--turn-limit", type=int, default=0, dest="turn_limit",
+                      help="Seconds per turn before a player is forced to pass (0 = no limit).")
+    host.add_argument("--ai", action="append", default=None, metavar="LEVEL",
+                      help="Seat an AI player (easy|medium|hard|expert). Repeat for more bots.")
+    host.add_argument("--no-coach", action="store_true",
+                      help="Disable post-move coaching (top plays + comments).")
     host.set_defaults(func=cmd_host)
 
     join = sub.add_parser("join", help="Join a game as a player.")

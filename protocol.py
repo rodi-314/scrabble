@@ -1,10 +1,12 @@
 """Wire protocol: every websocket message is a JSON object with a ``type`` key.
 
-Client -> server: join, start, play, pass, swap, shuffle, chat
-Server -> client: welcome, state, rack, error, info, chat
+Client -> server: join, start, play, pass, swap, shuffle, chat, setteam, check,
+                  addai, removeai
+Server -> client: welcome, state, rack, error, info, chat, checked, coach
 
 A ``join`` may carry ``"spectator": true`` to watch without taking a seat, and a
 reconnecting player carries the secret ``"token"`` it was issued on first join.
+A ``chat`` may carry ``"scope": "team"`` for a private team-only message.
 """
 
 import json
@@ -17,6 +19,10 @@ PASS = "pass"
 SWAP = "swap"
 SHUFFLE = "shuffle"
 CHAT = "chat"
+SETTEAM = "setteam"      # set/clear the sender's team (lobby only)
+CHECK = "check"          # ask whether one or more words are valid
+ADDAI = "addai"          # host: add a computer player (lobby only)
+REMOVEAI = "removeai"    # host: remove a computer player (lobby only)
 
 # server -> client
 WELCOME = "welcome"
@@ -25,6 +31,8 @@ RACK = "rack"
 ERROR = "error"
 INFO = "info"
 CHATMSG = "chat"
+CHECKED = "checked"      # result of a word-validity check
+COACH = "coach"          # private post-move coaching (top plays + a comment)
 
 
 def _reject_constant(value):

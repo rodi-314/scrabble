@@ -81,6 +81,8 @@ It prints something like:
 ========================================================
   Listening on 0.0.0.0:8765  (encrypted: AES-256-GCM)
   Dictionary : 1000+ words loaded
+  Turn limit : none
+  Coaching   : on (top plays + comments after each move)
 
   Room key   : 3f7a-1c92-...-redacted
   Share this key with your players -- nobody can join (or sniff the
@@ -133,6 +135,11 @@ Tiles are dealt and play begins.
 | `pass` | Forfeit your turn |
 | `swap <letters>` | Exchange tiles, e.g. `swap aei` (use `?` for a blank) |
 | `shuffle` | Randomly reorder the tiles on your rack |
+| `check <word> [word ...]` | Check whether word(s) are valid (any time) |
+| `team <name>` | (Lobby) join a team; `team none` to leave it |
+| `tc <message>` | Private chat to your teammates only |
+| `addai <easy\|medium\|hard\|expert>` | (Host, lobby) add a computer player |
+| `removeai <name>` | (Host, lobby) remove a computer player |
 | `start` | (First player only) begin the game |
 | `say <message>` or just type text | Chat with the other players |
 | `values` | Show the point value of every letter |
@@ -173,6 +180,96 @@ Spectators see the live board, scores and chat (and can chat themselves), but
 they hold no rack and cannot play, pass, swap or start. The player list shows
 how many spectators are watching.
 
+### Teams and private chat
+
+In the **lobby**, pick a team and you'll play as a unit:
+
+```
+team Red
+```
+
+Players on the same team **share a combined score**, and the winner is decided
+by the highest **team total** (so two solid players can beat one big scorer).
+Teammates also get a **private chat channel** — nobody outside the team (not the
+other team, not spectators) can read it:
+
+```
+tc let's open with the triple-word in the corner
+```
+
+Teaming is entirely opt-in: with no teams set, the game is the usual
+free-for-all, and a player who never joins a team is simply a "team of one". The
+scoreboard groups players by team and shows each team's total, in-game and on
+the final results screen. (`team none` leaves your team while still in the lobby.)
+
+### Word checker
+
+Not sure a word is real? Check it any time — it doesn't use your turn, and even
+spectators can:
+
+```
+check zydeco qi flummox
+```
+
+The server answers from its dictionary, marking each word **valid** or
+**INVALID** and showing its face value (tile points). With `--no-dict` the
+server accepts everything, and the checker says so.
+
+### Turn time limit
+
+The host can put a clock on every turn:
+
+```bash
+python scrabble.py host --turn-limit 60
+```
+
+Each player then has that many seconds to move; when the clock runs out the
+server **automatically passes** for them and play moves on. Everyone sees a live
+`[NNs left]` countdown next to the current turn. Without `--turn-limit` (or with
+`0`) there is no clock — the default.
+
+### AI players (easy / medium / hard / expert)
+
+Short a player? Add computer opponents. The host can seat them on the command
+line:
+
+```bash
+python scrabble.py host --ai easy --ai expert
+```
+
+or from the lobby at any time before the game starts:
+
+```
+addai hard
+removeai Robo(hard)
+```
+
+The four difficulties differ in how good a play they choose from everything
+that's legal: **expert** always plays the highest-scoring move, **hard** plays
+near the top, **medium** plays a middle-of-the-road move, and **easy** picks a
+deliberately weak (but real) play. AI seats take their turn automatically after
+a short "thinking" pause.
+
+### Coaching: top plays + a comment
+
+After **you** play a word, a private coach (only you see it) shows the
+**top-scoring plays you could have made** from that same rack, and ribs you
+about it:
+
+```
+-- Coach -- you played HELLO for 18.
+Best plays you could have made:
+   26  THOLES H3 down
+   24  HOTELS D7 across
+   ...
+Good play!
+```
+
+The comment scales with how close you got to the best available play — from
+"Optimal play!" down to "Try harder bro." Turn it off with `--no-coach` on the
+host. (The coach and the AI both need the dictionary, so they do little under
+`--no-dict`.)
+
 ### Placing words
 
 - **Coordinate** = a column letter (`A`–`O`) followed by a row number
@@ -201,6 +298,8 @@ how many spectators are watching.
   the bag is empty and a player goes out, or after two full rounds with no
   scoring. When it ends, everyone sees a final scoreboard showing each player's
   adjustment, their revealed leftover tiles, the final totals, and the winner.
+- In teaming mode, scores are pooled per team and the winner is the team with
+  the highest combined total.
 
 ### If your connection drops
 
@@ -238,7 +337,8 @@ python scrabble.py host --no-dict
 ## Options
 
 ```
-python scrabble.py host     [--host 0.0.0.0] [--port 8765] [--dict FILE] [--no-dict] [--key KEY]
+python scrabble.py host     [--host 0.0.0.0] [--port 8765] [--dict FILE] [--no-dict]
+                            [--key KEY] [--turn-limit SECONDS] [--ai LEVEL ...] [--no-coach]
 python scrabble.py join     <HOST_IP> [--port 8765] [--name NAME] [--no-color] [--key KEY]
 python scrabble.py spectate <HOST_IP> [--port 8765] [--name NAME] [--no-color] [--key KEY]
 ```
@@ -249,6 +349,11 @@ python scrabble.py spectate <HOST_IP> [--port 8765] [--name NAME] [--no-color] [
 - `--key` — the shared **room key** for encryption. On `host`, sets the key
   (default: a strong random one is generated and shown). On `join`/`spectate`,
   the key the host shared (you are prompted if it is omitted).
+- `--turn-limit` — seconds per turn before a player is force-passed
+  (`0`/omitted = no clock).
+- `--ai` — seat an AI player at the given difficulty (`easy`/`medium`/`hard`/
+  `expert`). Repeat the flag to add several bots.
+- `--no-coach` — turn off the post-move coaching (top plays + comments).
 - `--no-color` — disable ANSI colours for very basic terminals.
 
 ---
@@ -258,10 +363,12 @@ python scrabble.py spectate <HOST_IP> [--port 8765] [--name NAME] [--no-color] [
 No third-party test runner needed:
 
 ```bash
-python tests/test_engine.py        # rules + scoring unit tests
+python tests/test_engine.py        # rules + scoring + teams + AI seats
 python tests/test_crypto.py        # AES-256-GCM encryption unit tests
+python tests/test_wordsmith.py     # move generator vs. the engine (sound + complete)
 python tests/test_client_render.py # terminal UI + line-editor unit tests
 python tests/test_integration.py   # real server + real clients over the encrypted wire
+python tests/test_features.py      # teams, private chat, word check, turn limit, AI, coach
 ```
 
 ---
@@ -298,6 +405,7 @@ constants.py       # tile distribution, values, board premium layout
 board.py           # Board + Tile
 engine.py          # rules, validation, scoring, turn & game management
 dictionary.py      # word-list loading and validation
+wordsmith.py       # move generator + scorer, AI move selection, coaching
 protocol.py        # websocket message types (JSON)
 crypto.py          # AES-256-GCM link encryption (scrypt-derived room key)
 server.py          # async websocket server (the host)
